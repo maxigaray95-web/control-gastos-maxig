@@ -10,41 +10,25 @@ st.set_page_config(page_title="Control Financiero PRO", layout="wide")
 st.title("💳 Control Financiero PRO")
 
 # ------------------------
-# PARSE NUMEROS
+# FUNCION NUMEROS
 # ------------------------
 def parsear_numero(s):
     try:
         return float(s.replace(".", "").replace(",", "."))
     except:
-        return None
+        return 0
 
 # ------------------------
 # INPUTS
 # ------------------------
-sueldo_input = st.text_input("💰 Sueldo mensual (ej: 1093000,50)")
-sueldo = parsear_numero(sueldo_input)
+sueldo_input = st.text_input("💰 Sueldo mensual")
+dolar_input = st.text_input("💵 Cotización dólar")
 
-dolar_input = st.text_input("💵 Cotización dólar (ej: 1450)")
-dolar = parsear_numero(dolar_input)
-
-# ------------------------
-# PRESUPUESTOS
-# ------------------------
-st.subheader("🎯 Presupuesto por categoría")
-
-presupuestos = {
-    "Supermercado": st.number_input("Supermercado", value=200000),
-    "Combustible": st.number_input("Combustible", value=120000),
-    "Entretenimiento": st.number_input("Entretenimiento", value=50000),
-    "Salud": st.number_input("Salud", value=40000),
-    "Educación": st.number_input("Educación", value=50000),
-    "Estudios": st.number_input("Estudios", value=250000),
-    "Impuestos": st.number_input("Impuestos", value=80000),
-    "Otros": st.number_input("Otros", value=50000),
-}
+sueldo = parsear_numero(sueldo_input) if sueldo_input else 0
+dolar = parsear_numero(dolar_input) if dolar_input else 0
 
 # ------------------------
-# FILE UPLOAD
+# SUBIR ARCHIVOS
 # ------------------------
 archivos = st.file_uploader("📂 Subí resúmenes", type="pdf", accept_multiple_files=True)
 
@@ -61,74 +45,43 @@ def extraer_texto(pdf):
     return texto
 
 # ------------------------
-# CATEGORIAS
+# PARSER GENERAL (CUOTAS + USD)
 # ------------------------
-def categorizar(desc):
-    d = desc.lower()
-
-    if "ypf" in d or "shell" in d:
-        return "Combustible"
-    elif "mercado" in d:
-        return "Supermercado"
-    elif "netflix" in d or "spotify" in d:
-        return "Entretenimiento"
-    elif "farmacia" in d:
-        return "Salud"
-    elif "udemy" in d:
-        return "Educación"
-    elif "pagotic" in d or "unsiglo" in d:
-        return "Estudios"
-    elif "impuesto" in d or "iva" in d:
-        return "Impuestos"
-    else:
-        return "Otros"
-
-# ------------------------
-# PARSER SUPERVIELLE
-# ------------------------
-def parser_supervielle(texto):
+def procesar_resumen(texto):
     datos = []
-    lineas = texto.split("\n")
-
-    for linea in lineas:
-        if "C." in linea:
-            match = re.search(r"C\.(\d+)/(\d+)", linea)
-            monto = re.search(r"([\d\.]+,\d+)$", linea)
-
-            if match and monto:
-                valor = parsear_numero(monto.group(1))
-
-                datos.append({
-                    "descripcion": linea,
-                    "monto": valor,
-                    "restantes": int(match.group(2)) - int(match.group(1))
-                })
-
-    df = pd.DataFrame(datos)
-
-    total_match = re.search(r"SALDO ACTUAL\s+([\d\.,]+)", texto)
-    total = parsear_numero(total_match.group(1)) if total_match else 0
-
-    return df, total, 0
-
-# ------------------------
-# PARSER SANTANDER
-# ------------------------
-def parser_santander(texto):
-    datos = []
+    total_pesos = 0
     total_usd = 0
+    cuotas_detectadas = []
 
     for linea in texto.split("\n"):
+
+        # detectar monto en pesos
         monto_pesos = re.search(r"([\d\.]+,\d+)", linea)
+
+        # detectar USD
         monto_usd = re.search(r"USD\s*([\d\.,]+)", linea)
+
+        # detectar cuotas
+        match_cuota = re.search(r"C\.(\d+)/(\d+)", linea)
+
+        valor = 0
 
         if monto_pesos:
             valor = parsear_numero(monto_pesos.group(1))
-        else:
-            valor = 0
+            total_pesos += valor
 
         if monto_usd:
-            total_usd += parsear_numero(monto_usd.group(1))
+            usd = parsear_numero(monto_usd.group(1))
+            total_usd += usd
+
+        # si hay cuotas → calcular pendientes
+        if match_cuota and valor > 0:
+            actual = int(match_cuota.group(1))
+            total = int(match_cuota.group(2))
+            restantes = total - actual
+
+            for i in range(restantes):
+                cuotas_detectadas.append(valor)
 
         if monto_pesos or monto_usd:
             datos.append({
@@ -138,32 +91,7 @@ def parser_santander(texto):
 
     df = pd.DataFrame(datos)
 
-    total_match = re.search(r"Total Consumos.*?([\d\.,]+)", texto)
-    total = parsear_numero(total_match.group(1)) if total_match else 0
-
-    return df, total, total_usd
-
-# ------------------------
-# HISTORIAL
-# ------------------------
-def guardar_historial(total, saldo):
-    archivo = "historial.csv"
-    fecha = datetime.now().strftime("%Y-%m")
-
-    nuevo = pd.DataFrame([{
-        "mes": fecha,
-        "total_gastado": total,
-        "saldo": saldo
-    }])
-
-    if os.path.exists(archivo):
-        viejo = pd.read_csv(archivo)
-        viejo = viejo[viejo["mes"] != fecha]
-        df = pd.concat([viejo, nuevo], ignore_index=True)
-    else:
-        df = nuevo
-
-    df.to_csv(archivo, index=False)
+    return df, total_pesos, total_usd, cuotas_detectadas
 
 # ------------------------
 # PROCESAMIENTO
@@ -173,89 +101,68 @@ if archivos and sueldo:
     total_pesos = 0
     total_usd = 0
     lista_df = []
+    todas_cuotas = []
 
     for archivo in archivos:
         texto = extraer_texto(archivo)
 
-        if "Supervielle" in texto:
-            df, total, usd = parser_supervielle(texto)
-        else:
-            df, total, usd = parser_santander(texto)
+        df, pesos, usd, cuotas = procesar_resumen(texto)
 
-        total_pesos += total
+        total_pesos += pesos
         total_usd += usd
         lista_df.append(df)
+        todas_cuotas.extend(cuotas)
 
     df_total = pd.concat(lista_df, ignore_index=True)
-    df_total["categoria"] = df_total["descripcion"].apply(categorizar)
 
-    gastos_categoria = df_total.groupby("categoria")["monto"].sum()
-
+    # conversion USD
     usd_en_pesos = total_usd * dolar if dolar else 0
     total_final = total_pesos + usd_en_pesos
     saldo = sueldo - total_final
-
-    guardar_historial(total_final, saldo)
 
     # ------------------------
     # RESULTADOS
     # ------------------------
     st.subheader("📊 Resultado")
-    st.write(f"Total: ${total_final:,.0f}")
-    st.write(f"Saldo: ${saldo:,.0f}")
+
+    st.write(f"💸 Total en pesos: ${total_pesos:,.0f}")
+    st.write(f"💵 USD: {total_usd:.2f}")
+
+    if dolar:
+        st.write(f"💱 USD en pesos: ${usd_en_pesos:,.0f}")
+
+    st.write(f"🔥 TOTAL REAL: ${total_final:,.0f}")
+    st.write(f"💰 Saldo disponible: ${saldo:,.0f}")
 
     # ------------------------
-    # ALERTAS
+    # CUOTAS
     # ------------------------
-    st.subheader("🚨 Alertas")
+    st.subheader("💳 Cuotas pendientes")
 
-    for cat, gasto in gastos_categoria.items():
-        presupuesto = presupuestos.get(cat, 0)
-        if gasto > presupuesto:
-            st.error(f"{cat}: te pasaste")
+    total_cuotas = sum(todas_cuotas)
 
-    if saldo < 0:
-        st.error("Estás en negativo")
+    st.write(f"Total deuda en cuotas: ${total_cuotas:,.0f}")
+    st.write(f"Cantidad de cuotas: {len(todas_cuotas)}")
 
     # ------------------------
-    # PREDICCION
+    # PROYECCION
     # ------------------------
-    st.subheader("🔮 Predicción")
+    st.subheader("📅 Proyección mensual de cuotas")
 
-    if os.path.exists("historial.csv"):
-        hist = pd.read_csv("historial.csv")
+    proyeccion = {}
 
-        if len(hist) >= 2:
-            promedio = hist["total_gastado"].mean()
-            tendencia = hist["total_gastado"].iloc[-1] - hist["total_gastado"].iloc[-2]
-            pred = promedio + tendencia
+    for i, monto in enumerate(todas_cuotas):
+        mes = f"Mes {i+1}"
+        proyeccion[mes] = proyeccion.get(mes, 0) + monto
 
-            st.write(f"Predicción: ${pred:,.0f}")
+    df_proyeccion = pd.DataFrame(list(proyeccion.items()), columns=["Mes", "Monto"])
 
-    # ------------------------
-    # RECOMENDACIONES
-    # ------------------------
-    st.subheader("🧠 Recomendaciones")
-
-    for cat, gasto in gastos_categoria.items():
-        presupuesto = presupuestos.get(cat, 0)
-        if gasto > presupuesto:
-            st.warning(f"Bajá {cat}")
-
-    if saldo < sueldo * 0.2:
-        st.warning("Tenés poco margen")
+    if not df_proyeccion.empty:
+        st.bar_chart(df_proyeccion.set_index("Mes"))
+        st.dataframe(df_proyeccion)
 
     # ------------------------
-    # GRAFICOS
+    # DETALLE
     # ------------------------
-    st.subheader("📊 Categorías")
-    st.bar_chart(gastos_categoria)
-
-# ------------------------
-# DASHBOARD
-# ------------------------
-if os.path.exists("historial.csv"):
-    hist = pd.read_csv("historial.csv")
-
-    st.subheader("📈 Evolución")
-    st.line_chart(hist.set_index("mes"))
+    st.subheader("📄 Detalle de consumos")
+    st.dataframe(df_total)
