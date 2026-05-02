@@ -57,34 +57,66 @@ def procesar_resumen(texto):
     total_usd = 0
     cuotas_info = []
 
-    # TOTAL REAL DEL RESUMEN EN PESOS
-    # Supervielle: "SALDO ACTUAL  <pesos>  <usd>"
-    # Otros bancos:  "TOTAL A PAGAR ..." / "Total Consumos ..."
-    # Usamos un único regex que captura correctamente el primer número tras la etiqueta
-    match_total = re.search(
-        r"(SALDO ACTUAL|TOTAL A PAGAR|Total Consumos)\s+([\d\.,]+)",
-        texto,
-        re.IGNORECASE
-    )
-    if match_total:
-        total_pagar = parsear_numero(match_total.group(2))
+    # ----------------------------------------------------------------
+    # TOTAL ARS + USD — soporta dos formatos de banco:
+    #
+    # SUPERVIELLE (última línea de movimientos):
+    #   "SALDO ACTUAL  12.606,73  25,97"
+    #   → el primer número es ARS, el segundo es USD
+    #
+    # SANTANDER (última página, junto a tasas):
+    #   "... SALDO ACTUAL $ 243.481,16 U $ S 24,48"
+    #   → marcado con $ y "U $ S" como separador de columna
+    #   Respaldo: "DEBITAREMOS ... LA SUMA DE $ 243481,16 + U$S 24,48"
+    # ----------------------------------------------------------------
 
-    # USD — leído de la línea "SALDO ACTUAL <pesos> <usd>"
-    # Esta línea aparece al final de la tabla de movimientos en Supervielle
-    # y tiene exactamente dos columnas numéricas: pesos y dólares.
-    # Esto evita capturar la TNA (ej: "TNA 98,630%") u otros números del PDF.
-    # Si el valor USD es negativo, significa saldo acreedor → no hay deuda en USD.
-    match_saldo = re.search(
-        r"SALDO ACTUAL\s+([\d\.,]+)\s+([\-\d\.,]+)",
+    # Intento 1 — Santander: "SALDO ACTUAL $ <ars> U $ S <usd>"
+    match_sant = re.search(
+        r"SALDO ACTUAL\s*\$\s*([\d\.,]+)\s+U\s*\$\s*S\s*([\d\.,]+)",
         texto,
         re.IGNORECASE
     )
-    if match_saldo:
-        # El total en pesos ya lo tenemos; usamos el segundo grupo para USD
-        usd_valor = parsear_numero(match_saldo.group(2))
-        if usd_valor > 0:
-            total_usd = usd_valor
-        # Si es negativo o cero: acreedor o sin deuda USD, no sumamos nada
+    if match_sant:
+        total_pagar = parsear_numero(match_sant.group(1))
+        usd_val = parsear_numero(match_sant.group(2))
+        if usd_val > 0:
+            total_usd = usd_val
+
+    # Intento 2 — Santander respaldo: "DEBITAREMOS ... $ <ars> + U$S <usd>"
+    if total_pagar == 0:
+        match_deb = re.search(
+            r"DEBITAREMOS.*?\$\s*([\d\.,]+)\s*\+\s*U\$S\s*([\d\.,]+)",
+            texto,
+            re.IGNORECASE
+        )
+        if match_deb:
+            total_pagar = parsear_numero(match_deb.group(1))
+            usd_val = parsear_numero(match_deb.group(2))
+            if usd_val > 0:
+                total_usd = usd_val
+
+    # Intento 3 — Supervielle: "SALDO ACTUAL <ars> <usd_o_negativo>"
+    if total_pagar == 0:
+        match_spv = re.search(
+            r"SALDO ACTUAL\s+([\d\.,]+)\s+([\-\d\.,]+)",
+            texto,
+            re.IGNORECASE
+        )
+        if match_spv:
+            total_pagar = parsear_numero(match_spv.group(1))
+            usd_val = parsear_numero(match_spv.group(2))
+            if usd_val > 0:
+                total_usd = usd_val
+
+    # Intento 4 — fallback genérico para otros bancos futuros
+    if total_pagar == 0:
+        match_gen = re.search(
+            r"(TOTAL A PAGAR|Total Consumos)\s+([\d\.,]+)",
+            texto,
+            re.IGNORECASE
+        )
+        if match_gen:
+            total_pagar = parsear_numero(match_gen.group(2))
 
     # CUOTAS
     for linea in texto.split("\n"):
