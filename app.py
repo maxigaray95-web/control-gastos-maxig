@@ -48,7 +48,7 @@ def extraer_texto(pdf):
 # ------------------------
 # PROCESAR RESUMEN
 # FIX 1: regex del total corregido para capturar número completo
-# FIX 2: USD ya no se suma al total (evita doble conteo si el banco ya lo convirtió)
+# FIX 2: USD leído del encabezado SALDO U$S, no del texto libre (evita capturar TNA 98,63%)
 # FIX 3: descripción de cuota ahora es solo la parte útil, no la línea entera
 # ------------------------
 def procesar_resumen(texto):
@@ -57,22 +57,34 @@ def procesar_resumen(texto):
     total_usd = 0
     cuotas_info = []
 
-    # TOTAL REAL DEL RESUMEN
-    # FIX: [^\d]* en lugar de .*? para no capturar el primer número suelto
+    # TOTAL REAL DEL RESUMEN EN PESOS
+    # Supervielle: "SALDO ACTUAL  <pesos>  <usd>"
+    # Otros bancos:  "TOTAL A PAGAR ..." / "Total Consumos ..."
+    # Usamos un único regex que captura correctamente el primer número tras la etiqueta
     match_total = re.search(
-        r"(SALDO ACTUAL|TOTAL A PAGAR|Total Consumos)[^\d]*([\d\.,]+)",
+        r"(SALDO ACTUAL|TOTAL A PAGAR|Total Consumos)\s+([\d\.,]+)",
         texto,
         re.IGNORECASE
     )
     if match_total:
         total_pagar = parsear_numero(match_total.group(2))
 
-    # USD
-    # FIX: capturamos los consumos en USD para mostrarlos por separado
-    # NO los sumamos al total_general para evitar doble conteo
-    usd_matches = re.findall(r"USD\s*([\d\.,]+)", texto)
-    for usd in usd_matches:
-        total_usd += parsear_numero(usd)
+    # USD — leído de la línea "SALDO ACTUAL <pesos> <usd>"
+    # Esta línea aparece al final de la tabla de movimientos en Supervielle
+    # y tiene exactamente dos columnas numéricas: pesos y dólares.
+    # Esto evita capturar la TNA (ej: "TNA 98,630%") u otros números del PDF.
+    # Si el valor USD es negativo, significa saldo acreedor → no hay deuda en USD.
+    match_saldo = re.search(
+        r"SALDO ACTUAL\s+([\d\.,]+)\s+([\-\d\.,]+)",
+        texto,
+        re.IGNORECASE
+    )
+    if match_saldo:
+        # El total en pesos ya lo tenemos; usamos el segundo grupo para USD
+        usd_valor = parsear_numero(match_saldo.group(2))
+        if usd_valor > 0:
+            total_usd = usd_valor
+        # Si es negativo o cero: acreedor o sin deuda USD, no sumamos nada
 
     # CUOTAS
     for linea in texto.split("\n"):
