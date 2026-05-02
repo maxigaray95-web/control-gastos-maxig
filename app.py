@@ -2,8 +2,6 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-import os
-from datetime import datetime
 
 st.set_page_config(page_title="Control Financiero PRO", layout="wide")
 
@@ -19,18 +17,17 @@ def parsear_numero(s):
         return 0
 
 # ------------------------
-# INPUTS
+# DETECTAR BANCO
 # ------------------------
-sueldo_input = st.text_input("💰 Sueldo mensual")
-dolar_input = st.text_input("💵 Cotización dólar")
+def detectar_banco(texto):
+    texto = texto.lower()
 
-sueldo = parsear_numero(sueldo_input) if sueldo_input else 0
-dolar = parsear_numero(dolar_input) if dolar_input else 0
-
-# ------------------------
-# SUBIR ARCHIVOS
-# ------------------------
-archivos = st.file_uploader("📂 Subí resúmenes", type="pdf", accept_multiple_files=True)
+    if "santander" in texto:
+        return "Santander"
+    elif "supervielle" in texto:
+        return "Supervielle"
+    else:
+        return "Desconocido"
 
 # ------------------------
 # EXTRAER TEXTO
@@ -45,124 +42,147 @@ def extraer_texto(pdf):
     return texto
 
 # ------------------------
-# PARSER GENERAL (CUOTAS + USD)
+# PROCESAR RESUMEN
 # ------------------------
 def procesar_resumen(texto):
-    datos = []
-    total_pesos = 0
-    total_usd = 0
-    cuotas_detectadas = []
 
+    total_pagar = 0
+    total_usd = 0
+    cuotas_info = []
+
+    # TOTAL REAL DEL RESUMEN
+    match_total = re.search(r"(SALDO ACTUAL|Total Consumos).*?([\d\.,]+)", texto)
+
+    if match_total:
+        total_pagar = parsear_numero(match_total.group(2))
+
+    # USD
+    usd_matches = re.findall(r"USD\s*([\d\.,]+)", texto)
+    for usd in usd_matches:
+        total_usd += parsear_numero(usd)
+
+    # CUOTAS
     for linea in texto.split("\n"):
 
-        # detectar monto en pesos
-        monto_pesos = re.search(r"([\d\.]+,\d+)", linea)
-
-        # detectar USD
-        monto_usd = re.search(r"USD\s*([\d\.,]+)", linea)
-
-        # detectar cuotas
         match_cuota = re.search(r"C\.(\d+)/(\d+)", linea)
 
-        valor = 0
-
-        if monto_pesos:
-            valor = parsear_numero(monto_pesos.group(1))
-            total_pesos += valor
-
-        if monto_usd:
-            usd = parsear_numero(monto_usd.group(1))
-            total_usd += usd
-
-        # si hay cuotas → calcular pendientes
-        if match_cuota and valor > 0:
+        if match_cuota:
             actual = int(match_cuota.group(1))
             total = int(match_cuota.group(2))
-            restantes = total - actual
 
-            for i in range(restantes):
-                cuotas_detectadas.append(valor)
-
-        if monto_pesos or monto_usd:
-            datos.append({
+            cuotas_info.append({
                 "descripcion": linea,
-                "monto": valor
+                "cuota_actual": actual,
+                "cuotas_totales": total
             })
 
-    df = pd.DataFrame(datos)
+    return total_pagar, total_usd, cuotas_info
 
-    return df, total_pesos, total_usd, cuotas_detectadas
+# ------------------------
+# INPUTS
+# ------------------------
+sueldo_input = st.text_input("💰 Sueldo mensual")
+dolar_input = st.text_input("💵 Cotización dólar")
+
+sueldo = parsear_numero(sueldo_input) if sueldo_input else 0
+dolar = parsear_numero(dolar_input) if dolar_input else 0
+
+# ------------------------
+# UPLOAD
+# ------------------------
+archivos = st.file_uploader("📂 Subí resúmenes", type="pdf", accept_multiple_files=True)
 
 # ------------------------
 # PROCESAMIENTO
 # ------------------------
 if archivos and sueldo:
 
-    total_pesos = 0
+    total_general = 0
     total_usd = 0
-    lista_df = []
     todas_cuotas = []
+    totales_por_banco = {}
+
+    st.subheader("📄 Resumen por tarjeta")
 
     for archivo in archivos:
+
         texto = extraer_texto(archivo)
 
-        df, pesos, usd, cuotas = procesar_resumen(texto)
+        banco = detectar_banco(texto)
 
-        total_pesos += pesos
+        total, usd, cuotas = procesar_resumen(texto)
+
+        total_general += total
         total_usd += usd
-        lista_df.append(df)
         todas_cuotas.extend(cuotas)
 
-    df_total = pd.concat(lista_df, ignore_index=True)
+        # acumular por banco
+        if banco not in totales_por_banco:
+            totales_por_banco[banco] = 0
 
-    # conversion USD
+        totales_por_banco[banco] += total
+
+        # UI por resumen
+        st.markdown("---")
+        st.subheader(f"🏦 {banco} | 📄 {archivo.name}")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric("💰 Total a pagar", f"${total:,.0f}")
+
+        with col2:
+            if usd > 0:
+                st.metric("💵 Consumos en USD", f"{usd:.2f}")
+
+    # ------------------------
+    # CONVERSION USD
+    # ------------------------
     usd_en_pesos = total_usd * dolar if dolar else 0
-    total_final = total_pesos + usd_en_pesos
+    total_final = total_general + usd_en_pesos
     saldo = sueldo - total_final
 
     # ------------------------
-    # RESULTADOS
+    # RESULTADO GENERAL
     # ------------------------
-    st.subheader("📊 Resultado")
+    st.subheader("💰 Total general")
 
-    st.write(f"💸 Total en pesos: ${total_pesos:,.0f}")
-    st.write(f"💵 USD: {total_usd:.2f}")
+    st.write(f"💸 Total en pesos: ${total_general:,.0f}")
+    st.write(f"💵 Total USD: {total_usd:.2f}")
 
     if dolar:
         st.write(f"💱 USD en pesos: ${usd_en_pesos:,.0f}")
 
-    st.write(f"🔥 TOTAL REAL: ${total_final:,.0f}")
+    st.write(f"🔥 TOTAL FINAL: ${total_final:,.0f}")
     st.write(f"💰 Saldo disponible: ${saldo:,.0f}")
+
+    # ------------------------
+    # DEUDA POR BANCO
+    # ------------------------
+    st.subheader("🏦 Deuda por banco")
+
+    total_global = sum(totales_por_banco.values())
+
+    for banco, monto in totales_por_banco.items():
+        porcentaje = (monto / total_global) * 100 if total_global > 0 else 0
+        st.write(f"{banco}: ${monto:,.0f} ({porcentaje:.1f}%)")
+
+    # gráfico
+    df_bancos = pd.DataFrame(
+        list(totales_por_banco.items()),
+        columns=["Banco", "Monto"]
+    )
+
+    st.bar_chart(df_bancos.set_index("Banco"))
 
     # ------------------------
     # CUOTAS
     # ------------------------
-    st.subheader("💳 Cuotas pendientes")
+    st.subheader("💳 Cuotas detectadas")
 
-    total_cuotas = sum(todas_cuotas)
-
-    st.write(f"Total deuda en cuotas: ${total_cuotas:,.0f}")
-    st.write(f"Cantidad de cuotas: {len(todas_cuotas)}")
-
-    # ------------------------
-    # PROYECCION
-    # ------------------------
-    st.subheader("📅 Proyección mensual de cuotas")
-
-    proyeccion = {}
-
-    for i, monto in enumerate(todas_cuotas):
-        mes = f"Mes {i+1}"
-        proyeccion[mes] = proyeccion.get(mes, 0) + monto
-
-    df_proyeccion = pd.DataFrame(list(proyeccion.items()), columns=["Mes", "Monto"])
-
-    if not df_proyeccion.empty:
-        st.bar_chart(df_proyeccion.set_index("Mes"))
-        st.dataframe(df_proyeccion)
-
-    # ------------------------
-    # DETALLE
-    # ------------------------
-    st.subheader("📄 Detalle de consumos")
-    st.dataframe(df_total)
+    if todas_cuotas:
+        df_cuotas = pd.DataFrame(todas_cuotas)
+        st.dataframe(df_cuotas)
+        st.write(f"Total de compras en cuotas: {len(df_cuotas)}")
+    else:
+        st.write("No se detectaron cuotas")
